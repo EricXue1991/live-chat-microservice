@@ -1,0 +1,100 @@
+# LiveChat — Full Local Dev Stack
+# Start: docker-compose up --build
+# Frontend: http://localhost:3000 | Backend: http://localhost:8080
+
+services:
+  # === PostgreSQL (users, rooms) ===
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: livechat
+      POSTGRES_PASSWORD: livechat
+      POSTGRES_DB: livechat
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U livechat"]
+      interval: 5s
+      retries: 10
+
+  # === Redis (cache, rate limiting, presence) ===
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  # === Zookeeper (Kafka dependency) ===
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # === Kafka (event stream, analytics pipeline) ===
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    ports: ["9092:9092"]
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  # === LocalStack (DynamoDB, SQS, SNS, S3) ===
+  localstack:
+    image: localstack/localstack:3.0
+    ports: ["4566:4566"]
+    environment:
+      SERVICES: dynamodb,sqs,sns,s3
+      DEBUG: 0
+    volumes:
+      - "./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh"
+      - localstack_data:/var/lib/localstack
+
+  # === Go Backend ===
+  backend:
+    build: ./backend
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      localstack: { condition: service_started }
+      kafka: { condition: service_started }
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: "postgres://livechat:livechat@postgres:5432/livechat?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC: "livechat-events"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      AWS_ENDPOINT_URL: "http://localstack:4566"
+      DYNAMODB_MESSAGES_TABLE: "livechat-messages"
+      DYNAMODB_REACTIONS_TABLE: "livechat-reactions"
+      S3_BUCKET: "livechat-attachments"
+      SNS_TOPIC_ARN: "arn:aws:sns:us-east-1:000000000000:livechat-broadcast"
+      SQS_REACTION_QUEUE_URL: "http://localstack:4566/000000000000/livechat-reactions"
+      SQS_BROADCAST_QUEUE_URL: "http://localstack:4566/000000000000/livechat-broadcast"
+      JWT_SECRET: "local-dev-secret-change-in-prod"
+      REACTION_MODE: "async"
+      CACHE_ENABLED: "true"
+      RATE_LIMIT_RPS: "20"
+    restart: on-failure
+
+  # === React Frontend ===
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: [backend]
+
+volumes:
+  pgdata:
+  localstack_data:

@@ -1,0 +1,29 @@
+# Go
+backend/livechat
+*.exe
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate*
+infra/.terraform.lock.hcl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+*.env.local
+
+# Data
+scripts/results/
+localstack_data/
+pgdata/
+
+# OS
+.DS_Store
