@@ -3,6 +3,7 @@ package reaction
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -19,10 +20,8 @@ import (
 	kafkaGo "github.com/segmentio/kafka-go"
 )
 
-// Handler processes reaction HTTP requests.
-// Two modes (toggled via REACTION_MODE env var for experiment 3):
-//   "sync":  each reaction directly updates DynamoDB counter
-//   "async": reaction enqueued to SQS, aggregator batch-updates DynamoDB
+// Handler serves HTTP endpoints for reactions.
+// Redis is reserved for optional cache/presence (same wiring as chat); Kafka is optional analytics.
 type Handler struct {
 	db    *dynamodb.Client
 	sqs   *sqs.Client
@@ -35,8 +34,13 @@ func NewHandler(db *dynamodb.Client, sqsClient *sqs.Client, rdb *redis.Client, k
 	return &Handler{db: db, sqs: sqsClient, rdb: rdb, kafka: kafka, cfg: cfg}
 }
 
-// SubmitReaction handles POST /api/reactions.
-// Routes to sync or async path based on REACTION_MODE.
+// SubmitReaction accepts a single reaction event.
+// POST /api/reactions
+//
+// Modes (REACTION_MODE env, for experiment 3):
+//
+//	"sync":  write directly to DynamoDB
+//	"async": enqueue to SQS for the aggregator worker to batch-flush
 func (h *Handler) SubmitReaction(w http.ResponseWriter, r *http.Request) {
 	username := middleware.GetUsername(r)
 
@@ -45,6 +49,7 @@ func (h *Handler) SubmitReaction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid request body"})
 		return
 	}
+
 	if event.RoomID == "" || event.ReactionType == "" {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "room_id and reaction_type required"})
 		return
@@ -53,16 +58,26 @@ func (h *Handler) SubmitReaction(w http.ResponseWriter, r *http.Request) {
 	event.Username = username
 	event.Timestamp = models.NowMillis()
 
+	ctx := r.Context()
+
+	// Pick sync vs async persistence based on config.
+	var err error
 	if h.cfg.ReactionMode == "sync" {
-		// Sync: direct DynamoDB write per click (experiment 3 baseline)
-		h.syncWrite(&event)
+		// Sync: one DynamoDB write per reaction (simple; can bottleneck under load).
+		err = h.syncWrite(ctx, &event)
 	} else {
-		// Async: enqueue to SQS for batch aggregation (experiment 3 improved)
-		h.asyncEnqueue(&event)
+		// Async: enqueue to SQS; aggregator batches writes and decouples API from storage.
+		err = h.asyncEnqueue(ctx, &event)
+	}
+	if err != nil {
+		log.Printf("[REACTION] submit failed (mode=%s): %v", h.cfg.ReactionMode, err)
+		writeJSON(w, http.StatusServiceUnavailable, models.ErrorResponse{
+			Error: "failed to persist reaction",
+		})
+		return
 	}
 
-	// Publish to Kafka event stream regardless of mode
-	h.publishToKafka(&event)
+	h.publishReactionToKafka(&event)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status": "accepted",
@@ -70,10 +85,10 @@ func (h *Handler) SubmitReaction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// syncWrite performs an atomic counter increment directly on DynamoDB.
-// Simple but becomes a bottleneck under high concurrency.
-func (h *Handler) syncWrite(event *models.ReactionEvent) {
-	_, err := h.db.UpdateItem(context.TODO(), &dynamodb.UpdateItemInput{
+// syncWrite increments the reaction counter in DynamoDB (UpdateItem ADD).
+// Experiment 3 baseline: one DynamoDB write per reaction.
+func (h *Handler) syncWrite(ctx context.Context, event *models.ReactionEvent) error {
+	_, err := h.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(h.cfg.ReactionsTable),
 		Key: map[string]types.AttributeValue{
 			"room_id":       &types.AttributeValueMemberS{Value: event.RoomID},
@@ -81,76 +96,76 @@ func (h *Handler) syncWrite(event *models.ReactionEvent) {
 		},
 		UpdateExpression: aws.String("ADD #count :inc"),
 		ExpressionAttributeNames: map[string]string{
-			"#count": "count", // "count" is a DynamoDB reserved word
+			"#count": "count", // "count" is reserved; use an expression attribute name
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":inc": &types.AttributeValueMemberN{Value: "1"},
 		},
 	})
 	if err != nil {
-		log.Printf("[REACTION] sync write error: %v", err)
+		log.Printf("[REACTION] sync DynamoDB UpdateItem error: %v", err)
 	}
+	return err
 }
 
-// asyncEnqueue sends the reaction event to SQS for batch processing.
-func (h *Handler) asyncEnqueue(event *models.ReactionEvent) {
-	data, _ := json.Marshal(event)
-	_, err := h.sqs.SendMessage(context.TODO(), &sqs.SendMessageInput{
+// asyncEnqueue sends the reaction event to SQS for the aggregator to consume in batches.
+func (h *Handler) asyncEnqueue(ctx context.Context, event *models.ReactionEvent) error {
+	if h.cfg.ReactionQueueURL == "" {
+		return fmt.Errorf("SQS_REACTION_QUEUE_URL is not set")
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	_, err = h.sqs.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:    aws.String(h.cfg.ReactionQueueURL),
 		MessageBody: aws.String(string(data)),
 	})
 	if err != nil {
 		log.Printf("[REACTION] SQS send error: %v", err)
 	}
+	return err
 }
 
-// publishToKafka sends the reaction event to Kafka for analytics.
-func (h *Handler) publishToKafka(event *models.ReactionEvent) {
+// publishReactionToKafka emits a durable event for the analytics pipeline (optional; nil writer = no-op).
+func (h *Handler) publishReactionToKafka(event *models.ReactionEvent) {
 	if h.kafka == nil {
 		return
 	}
-	kafkaEvent := models.KafkaEvent{
+	ke := models.KafkaEvent{
 		EventType: "reaction",
 		RoomID:    event.RoomID,
 		Username:  event.Username,
 		Timestamp: event.Timestamp,
-		Data:      event,
+		Data: map[string]string{
+			"reaction_type": event.ReactionType,
+			"mode":          h.cfg.ReactionMode,
+		},
 	}
-	payload, _ := json.Marshal(kafkaEvent)
-	h.kafka.WriteMessages(context.Background(), kafkaGo.Message{
+	payload, err := json.Marshal(ke)
+	if err != nil {
+		return
+	}
+	if err := h.kafka.WriteMessages(context.Background(), kafkaGo.Message{
 		Key:   []byte(event.RoomID),
 		Value: payload,
-	})
+	}); err != nil {
+		log.Printf("[REACTION] Kafka publish error: %v", err)
+	}
 }
 
-// GetReactions handles GET /api/reactions?roomId=xxx.
-// Returns all reaction type counts for a room.
-// Uses Redis cache if enabled (experiment 5).
+// GetReactions returns per-type counts for a room.
+// GET /api/reactions?roomId=xxx
 func (h *Handler) GetReactions(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("roomId")
 	if roomID == "" {
-		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "roomId required"})
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "roomId query parameter required"})
 		return
 	}
 
-	// Try Redis cache first
-	if h.cfg.CacheEnabled && h.rdb != nil {
-		cached, err := h.rdb.Get(context.Background(), "reactions:"+roomID).Result()
-		if err == nil {
-			var reactions []models.Reaction
-			if json.Unmarshal([]byte(cached), &reactions) == nil {
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"room_id":   roomID,
-					"reactions": reactions,
-					"source":    "cache",
-				})
-				return
-			}
-		}
-	}
-
-	// Cache miss — query DynamoDB
-	result, err := h.db.Query(context.TODO(), &dynamodb.QueryInput{
+	// Query all reaction types and counts for this partition (room_id).
+	result, err := h.db.Query(r.Context(), &dynamodb.QueryInput{
 		TableName:              aws.String(h.cfg.ReactionsTable),
 		KeyConditionExpression: aws.String("room_id = :rid"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
@@ -158,27 +173,25 @@ func (h *Handler) GetReactions(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		log.Printf("[REACTION] DynamoDB query error: %v", err)
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "query failed"})
+		log.Printf("[REACTION] DynamoDB Query error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "failed to query reactions"})
 		return
 	}
 
 	var reactions []models.Reaction
-	attributevalue.UnmarshalListOfMaps(result.Items, &reactions)
-	if reactions == nil {
-		reactions = []models.Reaction{}
+	if err := attributevalue.UnmarshalListOfMaps(result.Items, &reactions); err != nil {
+		log.Printf("[REACTION] unmarshal error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "internal error"})
+		return
 	}
 
-	// Fill cache (short TTL because reactions update frequently)
-	if h.cfg.CacheEnabled && h.rdb != nil {
-		data, _ := json.Marshal(reactions)
-		h.rdb.Set(context.Background(), "reactions:"+roomID, string(data), 3*1000000000) // 3 seconds
+	if reactions == nil {
+		reactions = []models.Reaction{}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"room_id":   roomID,
 		"reactions": reactions,
-		"source":    "dynamodb",
 	})
 }
 
