@@ -137,6 +137,8 @@ class ReactionHeavyUser(HttpUser):
 class PollingUser(HttpUser):
     """
     Experiment 4 baseline — HTTP polling at ~1s interval.
+    Each user both sends messages and polls for new ones, mirroring WebSocketUser's
+    send+receive pattern so the two approaches are compared fairly.
     Measures end-to-end message delivery latency via polling.
     """
     wait_time = between(0.9, 1.1)
@@ -160,7 +162,15 @@ class PollingUser(HttpUser):
     def _h(self):
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
-    @task
+    @task(1)
+    def send_message(self):
+        if not self.token: return
+        self.client.post("/api/messages", json={
+            "room_id": self.room_id,
+            "content": f"poll_test {self.username} t={time.time():.3f}",
+        }, headers=self._h(), name="/api/messages [POLL_USER]")
+
+    @task(3)
     def poll_messages(self):
         if not self.token: return
         resp = self.client.get(
