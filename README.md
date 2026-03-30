@@ -48,6 +48,22 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
 5. **Cache Hit vs Miss** — Redis cache impact on read latency
 6. **Rate Limiting** — system stability under abuse
 
+### Experiment 3 (sync vs async reactions)
+
+1. Bring the stack up with relaxed rate limits so reactions are the bottleneck:
+
+   `REACTION_MODE=async docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build`
+
+2. Run a reaction-heavy Locust profile (writes mostly to one room):
+
+   `./scripts/run_experiment3_local.sh`
+
+   Override load with env vars, e.g. `USERS=120 DURATION=180s ./scripts/run_experiment3_local.sh`.
+
+3. Repeat with sync mode (restart backend): `REACTION_MODE=sync` in the same `docker compose ...` command.
+
+4. Compare Locust CSVs under `scripts/results/` and optional `GET /api/status` fields `reaction_queue_visible` / `reaction_queue_inflight` (async only). Report targets: POST `/api/reactions` throughput and p95/p99, DynamoDB pressure, queue backlog in async mode.
+
 ## Quick Start
 
 ```bash

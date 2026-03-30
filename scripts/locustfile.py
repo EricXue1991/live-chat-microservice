@@ -8,7 +8,8 @@ Usage:
 Experiments:
     1. Scale-Out: vary ECS replicas (1/2/4/8), fixed load
     2. Hot Room: HOT_ROOM_RATIO controls traffic concentration
-    3. Sync vs Async: toggle REACTION_MODE env var on backend
+    3. Sync vs Async: toggle REACTION_MODE on backend; use ReactionHeavyUser:
+       locust -f locustfile.py --host http://localhost:8080 ReactionHeavyUser
     4. WS vs Polling: compare WebSocketUser and PollingUser latency
     5. Cache Hit vs Miss: toggle CACHE_ENABLED env var on backend
     6. Rate Limiting: toggle RATE_LIMIT_RPS env var on backend
@@ -84,6 +85,47 @@ class ChatUser(HttpUser):
         since = int((time.time() - 60) * 1000)
         self.client.get(f"/api/messages?roomId={self.room_id}&since={since}",
                         headers=self._h(), name="/api/messages [GET]")
+
+    @task(1)
+    def get_reactions(self):
+        if not self.token: return
+        self.client.get(f"/api/reactions?roomId={self.room_id}",
+                        headers=self._h(), name="/api/reactions [GET]")
+
+
+class ReactionHeavyUser(HttpUser):
+    """
+    Experiment 3 — reaction-dominated load on a single hot room.
+    Pair with docker-compose.exp3-overrides.yml (RATE_LIMIT_RPS=0) so limits
+    do not dominate; compare REACTION_MODE=sync vs async via Locust + /api/status.
+    """
+    wait_time = between(0.05, 0.15)
+
+    def on_start(self):
+        self.username = f"rx_{rand_str(10)}"
+        self.password = "test123456"
+        self.token = None
+        self.room_id = HOT_ROOM_ID
+
+        self.client.post("/api/register", json={
+            "username": self.username, "password": self.password,
+        })
+        resp = self.client.post("/api/login", json={
+            "username": self.username, "password": self.password,
+        })
+        if resp.status_code == 200:
+            self.token = resp.json().get("token")
+
+    def _h(self):
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+    @task(12)
+    def send_reaction(self):
+        if not self.token: return
+        self.client.post("/api/reactions", json={
+            "room_id": self.room_id,
+            "reaction_type": random.choice(REACTION_TYPES),
+        }, headers=self._h(), name="/api/reactions [POST]")
 
     @task(1)
     def get_reactions(self):

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/redis/go-redis/v9"
@@ -77,7 +79,7 @@ func main() {
 		Topic:        cfg.KafkaTopic,
 		Balancer:     &kafkaGo.LeastBytes{},
 		BatchTimeout: 50 * time.Millisecond, // low latency batching
-		Async:        true,                   // non-blocking writes
+		Async:        true,                  // non-blocking writes
 	}
 	// Test Kafka connectivity
 	conn, kafkaErr := kafkaGo.Dial("tcp", cfg.KafkaBrokers)
@@ -106,7 +108,7 @@ func main() {
 					URL:               cfg.AWSEndpoint,
 					HostnameImmutable: true,
 					PartitionID:       "aws",
-					SigningRegion:      cfg.AWSRegion,
+					SigningRegion:     cfg.AWSRegion,
 				}, nil
 			},
 		)
@@ -175,6 +177,30 @@ func main() {
 		}
 		if analyticsConsumer != nil {
 			status["analytics"] = analyticsConsumer.GetStats()
+		}
+		// Experiment 3: async path queue depth (sync mode leaves these unset).
+		if cfg.ReactionQueueURL != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			qout, err := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+				QueueUrl: aws.String(cfg.ReactionQueueURL),
+				AttributeNames: []sqstypes.QueueAttributeName{
+					sqstypes.QueueAttributeNameApproximateNumberOfMessages,
+					sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+				},
+			})
+			cancel()
+			if err == nil && qout.Attributes != nil {
+				if v := qout.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessages)]; v != "" {
+					if n, e := strconv.Atoi(v); e == nil {
+						status["reaction_queue_visible"] = n
+					}
+				}
+				if v := qout.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]; v != "" {
+					if n, e := strconv.Atoi(v); e == nil {
+						status["reaction_queue_inflight"] = n
+					}
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)

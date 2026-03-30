@@ -1,0 +1,11 @@
+# Experiment 3 (sync vs async reactions): use with main compose file.
+#
+#   REACTION_MODE=async docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build
+#   REACTION_MODE=sync  docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build
+#
+# RATE_LIMIT_RPS=0 disables per-user Redis limiting so reaction throughput reflects storage/queue behavior.
+services:
+  backend:
+    environment:
+      RATE_LIMIT_RPS: "0"
+      REACTION_MODE: "${REACTION_MODE:-async}"
