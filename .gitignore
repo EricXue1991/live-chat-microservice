@@ -19,6 +19,7 @@ infra/.terraform.lock.hcl
 # Env
 .env
 *.env.local
+.venv
 
 # Data
 scripts/results/
@@ -27,3 +28,7 @@ pgdata/
 
 # OS
 .DS_Store
+
+.mplconfig/
+**/__pycache__/
+*.pyc
