@@ -22,19 +22,34 @@ import (
 	kafkaGo "github.com/segmentio/kafka-go"
 )
 
+// Broadcaster is a local WebSocket hub that can push messages to room clients.
+// Defined as an interface here to avoid a circular import between chat and ws packages.
+type Broadcaster interface {
+	BroadcastToRoom(roomID string, msgType string, payload interface{})
+}
+
 // Handler processes chat message HTTP requests.
-// Write path: client → DynamoDB → SNS broadcast → Kafka event log
+// Write path: client → DynamoDB → direct Hub broadcast → SNS (cross-replica) → Kafka
 // Read path:  Redis cache (hit) → DynamoDB (miss) → cache fill
 type Handler struct {
-	db    *dynamodb.Client
-	sns   *sns.Client
-	rdb   *redis.Client
-	kafka *kafkaGo.Writer
-	cfg   *config.Config
+	db      *dynamodb.Client
+	sns     *sns.Client
+	rdb     *redis.Client
+	kafka   *kafkaGo.Writer
+	cfg     *config.Config
+	hub     Broadcaster // direct local WebSocket delivery (set via SetHub)
+	hubID   string      // sent as SourceID in SNS so SQS consumer skips own messages
 }
 
 func NewHandler(db *dynamodb.Client, snsClient *sns.Client, rdb *redis.Client, kafka *kafkaGo.Writer, cfg *config.Config) *Handler {
 	return &Handler{db: db, sns: snsClient, rdb: rdb, kafka: kafka, cfg: cfg}
+}
+
+// SetHub wires the local WebSocket hub into the chat handler.
+// Must be called after both the handler and hub are initialized in main.go.
+func (h *Handler) SetHub(hub Broadcaster, hubID string) {
+	h.hub = hub
+	h.hubID = hubID
 }
 
 // SendMessage handles POST /api/messages.
@@ -85,7 +100,13 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// Push to Redis cache — append to room's message list, trim to last 200
 	h.cacheMessage(&msg)
 
-	// Broadcast via SNS to other replicas
+	// Direct local broadcast — instantly pushes to WebSocket clients on this replica.
+	// This is the fast path (~15ms). The SNS path below handles other replicas.
+	if h.hub != nil {
+		h.hub.BroadcastToRoom(msg.RoomID, "chat", &msg)
+	}
+
+	// Broadcast via SNS to other replicas (SourceID prevents self-redelivery via SQS)
 	h.broadcastViaSNS(&msg)
 
 	// Publish to Kafka event stream for analytics
@@ -231,7 +252,7 @@ func (h *Handler) broadcastViaSNS(msg *models.Message) {
 	if h.cfg.SNSTopicARN == "" {
 		return
 	}
-	broadcast := models.BroadcastMessage{Type: "chat", RoomID: msg.RoomID, Message: msg}
+	broadcast := models.BroadcastMessage{Type: "chat", RoomID: msg.RoomID, Message: msg, SourceID: h.hubID}
 	data, _ := json.Marshal(broadcast)
 	_, err := h.sns.Publish(context.TODO(), &sns.PublishInput{
 		TopicArn: aws.String(h.cfg.SNSTopicARN),

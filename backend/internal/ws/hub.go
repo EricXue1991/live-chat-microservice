@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 //
 // Thread safety: sync.RWMutex protects the rooms map.
 type Hub struct {
+	id         string // unique replica ID — used to skip self-originated SQS messages
 	rooms      map[string]map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
@@ -43,6 +45,7 @@ type roomMessage struct {
 
 func NewHub(cfg *config.Config, sqsClient *sqs.Client, rdb *redis.Client) *Hub {
 	return &Hub{
+		id:         fmt.Sprintf("hub-%d", time.Now().UnixNano()),
 		rooms:      make(map[string]map[*Client]bool),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
@@ -52,6 +55,9 @@ func NewHub(cfg *config.Config, sqsClient *sqs.Client, rdb *redis.Client) *Hub {
 		rdb:        rdb,
 	}
 }
+
+// ID returns this hub's unique replica identifier.
+func (h *Hub) ID() string { return h.id }
 
 // Run starts the hub's main event loop.
 // Also launches the SQS consumer goroutine for cross-replica messages.
@@ -168,6 +174,16 @@ func (h *Hub) consumeSQS() {
 
 			var broadcast models.BroadcastMessage
 			if json.Unmarshal([]byte(body), &broadcast) != nil {
+				continue
+			}
+
+			// Skip messages originating from this replica — already delivered
+			// directly to local WebSocket clients via BroadcastToRoom().
+			if broadcast.SourceID == h.id {
+				h.sqs.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
+					QueueUrl:      aws.String(h.cfg.BroadcastQueueURL),
+					ReceiptHandle: sqsMsg.ReceiptHandle,
+				})
 				continue
 			}
 

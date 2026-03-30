@@ -138,6 +138,11 @@ func main() {
 	hub := ws.NewHub(cfg, sqsClient, rdb)
 	go hub.Run()
 
+	// Wire hub into chat handler for direct local WebSocket delivery.
+	// Without this, messages go through SNS→SQS (up to 20s delay) even for
+	// same-replica clients. SetHub enables the fast path: ~15ms delivery.
+	chatHandler.SetHub(hub, hub.ID())
+
 	wsHandler := ws.NewWSHandler(hub, dbClient, snsClient, rdb, kafkaWriter, cfg)
 
 	// ========== 8. Reaction aggregator (async mode) ==========
