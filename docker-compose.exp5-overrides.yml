@@ -1,0 +1,15 @@
+# Experiment 5 (Cache Hit vs Miss): use with main compose file.
+#
+#   # Pass 1 — cache ON (default, no override needed):
+#   docker compose up -d
+#
+#   # Pass 2 — cache OFF:
+#   docker compose -f docker-compose.yml -f docker-compose.exp5-overrides.yml up -d --build
+#
+# CACHE_ENABLED=false forces all GET /api/messages reads to hit DynamoDB directly.
+# RATE_LIMIT_RPS=0 removes rate limiting so cache behavior is the bottleneck.
+services:
+  backend:
+    environment:
+      CACHE_ENABLED: "false"
+      RATE_LIMIT_RPS: "0"

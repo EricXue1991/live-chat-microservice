@@ -16,6 +16,7 @@ Experiments:
 """
 
 import json
+import os
 import time
 import random
 import string
@@ -24,7 +25,7 @@ import websocket
 import threading
 
 # --- Config ---
-HOT_ROOM_RATIO = 0.9        # Experiment 2: 90% traffic to one room
+HOT_ROOM_RATIO = float(os.environ.get("HOT_ROOM_RATIO", "0.9"))  # Experiment 2
 HOT_ROOM_ID = "room-hot"
 MULTI_ROOMS = [f"room-{i}" for i in range(100)]
 REACTION_TYPES = ["like", "love", "laugh", "fire", "surprise", "sad"]

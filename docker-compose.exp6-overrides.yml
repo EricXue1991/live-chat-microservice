@@ -1,0 +1,14 @@
+# Experiment 6 (Rate Limiting): use with main compose file.
+#
+#   # Pass 1 — rate limiting ON (default, no override needed):
+#   docker compose up -d
+#
+#   # Pass 2 — rate limiting OFF:
+#   docker compose -f docker-compose.yml -f docker-compose.exp6-overrides.yml up -d --build
+#
+# RATE_LIMIT_RPS=0 disables per-user Redis rate limiting entirely.
+# Compare error rates and throughput against the default (RATE_LIMIT_RPS=20).
+services:
+  backend:
+    environment:
+      RATE_LIMIT_RPS: "0"
