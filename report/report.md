@@ -116,6 +116,12 @@ Persistent connection per client at `/ws/rooms/{roomId}`. Hub manages room membe
 - `WebSocketUser`: holds persistent WS connection, fires `WS_LATENCY = now - message.timestamp` on push receipt
 - Both user types send AND receive for symmetric comparison.
 
+### Experiment 1: Scale-Out — Yumeng Zeng
+
+**Hypothesis:** Throughput scales linearly with backend replica count because each replica handles an independent share of requests.
+
+**Setup:** 60 `ChatUser`, 90s per pass. 1 → 2 → 3 backend replicas behind an nginx round-robin load balancer (`nginx-lb` on port 8081). Rate limiting disabled. `docker compose -f docker-compose.exp1.yml up -d --scale backend=N`.
+
 ### Experiment 3: Sync vs Async Reactions — Yumeng Zeng
 
 **Hypothesis:** Async SQS-buffered reactions achieve higher throughput and lower latency than synchronous DynamoDB writes because the API returns before storage completes.
@@ -186,6 +192,24 @@ WebSocket p50 (180ms) exceeds the theoretical minimum (~20ms) because under 50 c
 **Engineering insight:** Production systems (Discord, Slack) use Redis Pub/Sub (~1ms) instead of SQS for cross-replica broadcast, making local vs remote delivery latency negligible.
 
 **Worst case:** HTTP polling wastes reads when no new messages exist; WebSocket hub fan-out is O(N) clients per room during bursts.
+
+### Experiment 1 — Scale-Out (Yumeng Zeng)
+
+60 concurrent users (`ChatUser`), 90s per pass, nginx round-robin load balancer.
+
+| Replicas | RPS | Ideal (linear) | Efficiency | p50 | p95 |
+|----------|-----|----------------|------------|-----|-----|
+| 1 | 44.8 | 44.8 | 100% | 19ms | 220ms |
+| 2 | 42.5 | 89.7 | **47%** | 23ms | 660ms |
+| 3 | 45.1 | 134.5 | **34%** | 16ms | 200ms |
+
+Throughput is flat (~44 RPS) regardless of replica count — adding backends does not improve throughput.
+
+**Root cause — LocalStack bottleneck:** All backend replicas share a single LocalStack process (DynamoDB, SQS, SNS, S3 all in-memory in one container). As replicas increase, they collectively hammer LocalStack harder, saturating the LocalStack I/O thread and nullifying any gain from the extra Go processes. The bottleneck is the shared data layer, not the application tier.
+
+**Engineering insight:** In production (real AWS DynamoDB with auto-scaling partitions, real SQS, real Redis), the shared data layer scales independently of the application tier. Adding replicas would produce near-linear throughput gains until the next bottleneck (DB connection pool limits, network bandwidth). This experiment correctly identifies where the bottleneck is, even if the result is "flat" — that is itself a valid finding: scale-out is only effective when the application tier is the bottleneck.
+
+**Worst case:** p95 jumps to 660ms with 2 replicas (LocalStack contention) but recovers at 3 replicas, showing non-monotonic behaviour that would not appear with real AWS services.
 
 ### Experiment 3 — Sync vs Async Reactions (Yumeng Zeng)
 

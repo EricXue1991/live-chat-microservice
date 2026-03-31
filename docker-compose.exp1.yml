@@ -1,0 +1,106 @@
+# Experiment 1: Scale-Out (standalone compose — NOT an override).
+#
+# Why standalone: Docker Compose cannot REMOVE port bindings via override files
+# (ports are always merged/appended). Running --scale backend=N with a fixed
+# host port "8080:8080" would fail with "port already allocated" for N>1.
+# Solution: this file exposes backend only internally; nginx-lb fronts on 8081.
+#
+# Usage:
+#   docker compose -f docker-compose.exp1.yml up -d --scale backend=N
+#   Locust target: http://localhost:8081
+#
+#   ./scripts/run_experiment1_local.sh
+
+services:
+  # === Infrastructure (identical to docker-compose.yml) ===
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: livechat
+      POSTGRES_PASSWORD: livechat
+      POSTGRES_DB: livechat
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U livechat"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  localstack:
+    image: localstack/localstack:3.0
+    ports: ["4566:4566"]
+    environment:
+      SERVICES: dynamodb,sqs,sns,s3
+      DEBUG: 0
+    volumes:
+      - "./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh"
+      - localstack_data:/var/lib/localstack
+
+  # === Backend (NO host port binding — traffic comes through nginx-lb) ===
+  backend:
+    build: ./backend
+    # No ports: mapping — nginx-lb proxies to backend:8080 internally.
+    # Multiple replicas can start without "port already allocated" errors.
+    depends_on:
+      postgres:    { condition: service_healthy }
+      redis:       { condition: service_healthy }
+      localstack:  { condition: service_started }
+      kafka:       { condition: service_started }
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: "postgres://livechat:livechat@postgres:5432/livechat?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC: "livechat-events"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      AWS_ENDPOINT_URL: "http://localstack:4566"
+      DYNAMODB_MESSAGES_TABLE: "livechat-messages"
+      DYNAMODB_REACTIONS_TABLE: "livechat-reactions"
+      S3_BUCKET: "livechat-attachments"
+      SNS_TOPIC_ARN: "arn:aws:sns:us-east-1:000000000000:livechat-broadcast"
+      SQS_REACTION_QUEUE_URL: "http://localstack:4566/000000000000/livechat-reactions"
+      SQS_BROADCAST_QUEUE_URL: "http://localstack:4566/000000000000/livechat-broadcast"
+      JWT_SECRET: "local-dev-secret-change-in-prod"
+      REACTION_MODE: "async"
+      CACHE_ENABLED: "true"
+      RATE_LIMIT_RPS: "0"
+    restart: on-failure
+
+  # === Nginx load balancer (exposed on host port 8081) ===
+  nginx-lb:
+    image: nginx:alpine
+    ports: ["8081:80"]
+    depends_on: [backend]
+    volumes:
+      - "./nginx-lb.conf:/etc/nginx/conf.d/default.conf:ro"
+    restart: on-failure
+
+volumes:
+  pgdata:
+  localstack_data:
