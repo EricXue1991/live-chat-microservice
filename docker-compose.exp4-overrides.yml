@@ -1,0 +1,10 @@
+# Experiment 4 (WebSocket vs HTTP Polling): use with main compose file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.exp4-overrides.yml up -d --build
+#
+# RATE_LIMIT_RPS=0 disables per-user Redis rate limiting so transport latency
+# (WebSocket push vs HTTP poll interval) is the bottleneck under test — not artificial limits.
+services:
+  backend:
+    environment:
+      RATE_LIMIT_RPS: "0"

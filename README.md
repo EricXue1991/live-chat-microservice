@@ -64,6 +64,34 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
 
 4. Compare Locust CSVs under `scripts/results/` and optional `GET /api/status` fields `reaction_queue_visible` / `reaction_queue_inflight` (async only). Report targets: POST `/api/reactions` throughput and p95/p99, DynamoDB pressure, queue backlog in async mode.
 
+### Experiment 4 (WebSocket vs HTTP Polling)
+
+Measures end-to-end message delivery latency for push (WebSocket) vs pull (HTTP polling) under concurrent load.
+
+**Note:** A bug was identified and fixed before running this experiment. The original `chat/handler.go` routed all WebSocket delivery through SNS → SQS (WaitTimeSeconds=20), causing up to 20s latency even for same-replica clients. The fix adds a direct `hub.BroadcastToRoom()` call for instant local delivery (~180ms p50 under load), while SNS/SQS is retained for cross-replica fan-out. See [GitHub issue] for details.
+
+1. Bring the stack up with rate limiting disabled so transport is the bottleneck:
+
+   `docker compose -f docker-compose.yml -f docker-compose.exp4-overrides.yml up -d --build`
+
+2. Run both Locust passes sequentially (PollingUser then WebSocketUser):
+
+   `./scripts/run_experiment4_local.sh`
+
+   Override load with env vars, e.g. `USERS=80 DURATION=120s ./scripts/run_experiment4_local.sh`.
+
+3. Generate comparison charts from the two CSV outputs:
+
+   ```
+   python scripts/plot_experiment4.py \
+     --polling-csv scripts/results/exp4_<timestamp>_polling/locust_stats.csv \
+     --ws-csv      scripts/results/exp4_<timestamp>_ws/locust_stats.csv
+   ```
+
+   Charts are saved to `report/figures/exp4/`.
+
+4. Compare results. Report targets: `POLL_LATENCY` vs `WS_LATENCY` e2e delivery at p50/p95/p99, average speedup ratio. Expected outcome: WebSocket ~3-5x lower p50 latency than polling under 50 concurrent users.
+
 ## Quick Start
 
 ```bash

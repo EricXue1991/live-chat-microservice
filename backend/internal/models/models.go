@@ -100,11 +100,14 @@ type WSMessage struct {
 }
 
 // BroadcastMessage is the SNS/SQS envelope for cross-replica fan-out.
+// SourceID is the sending hub's ID — the SQS consumer skips messages with a
+// matching SourceID because those were already delivered directly to local clients.
 type BroadcastMessage struct {
 	Type     string    `json:"type"`               // "chat" or "reaction_update"
 	RoomID   string    `json:"room_id"`
 	Message  *Message  `json:"message,omitempty"`
 	Reaction *Reaction `json:"reaction,omitempty"`
+	SourceID string    `json:"source_id,omitempty"`
 }
 
 // ==========================================================
