@@ -28,16 +28,16 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
 
 ## Components
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Auth & Users | PostgreSQL + JWT | User accounts, room metadata, relational data |
-| Chat Messages | DynamoDB | High-throughput message storage, room-partitioned |
-| Reactions | DynamoDB + SQS | Atomic counters with async batch aggregation |
-| Cache | Redis | Hot data cache, rate limiting, online presence |
-| Event Stream | Kafka | Durable event log, analytics pipeline, replay |
-| Broadcast | SNS → SQS | Cross-replica WebSocket message fan-out |
-| Attachments | S3 | File/image uploads |
-| Load Test | Locust | Simulated users for all experiments |
+| Component     | Technology       | Purpose                                           |
+| ------------- | ---------------- | ------------------------------------------------- |
+| Auth & Users  | PostgreSQL + JWT | User accounts, room metadata, relational data     |
+| Chat Messages | DynamoDB         | High-throughput message storage, room-partitioned |
+| Reactions     | DynamoDB + SQS   | Atomic counters with async batch aggregation      |
+| Cache         | Redis            | Hot data cache, rate limiting, online presence    |
+| Event Stream  | Kafka            | Durable event log, analytics pipeline, replay     |
+| Broadcast     | SNS → SQS        | Cross-replica WebSocket message fan-out           |
+| Attachments   | S3               | File/image uploads                                |
+| Load Test     | Locust           | Simulated users for all experiments               |
 
 ## Experiments
 
@@ -45,8 +45,54 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
 2. **Hot-Room vs Multi-Room** — DynamoDB partition throttling
 3. **Sync vs Async Reactions** — SQS batch aggregation benefit
 4. **WebSocket vs HTTP Polling** — push vs pull latency
-5. **Cache Hit vs Miss** — Redis cache impact on read latency
-6. **Rate Limiting** — system stability under abuse
+
+### Experiment 2: Hot-Room vs Multi-Room
+
+Measures the impact of concentrated traffic on a single DynamoDB partition key vs traffic distributed across 100 partition keys.
+
+**Setup**
+
+- **Hot Room:** 500 simulated users, ALL traffic to `room-hot` (single partition key)
+- **Multi Room:** 500 simulated users, each assigned a random room from 100 rooms
+- Both runs use identical task weights and 180-second duration
+- Rate limiting and Redis cache disabled to isolate storage/application behavior
+
+**How to run**
+
+```bash
+# 1. Start stack with experiment overrides
+docker compose -f docker-compose.yml -f docker-compose.exp2-overrides.yml up -d --build
+
+# 2. Run both passes (hot room then multi room, 30s cooldown between)
+./scripts/run_experiment2_local.sh
+
+# Override defaults:
+USERS=500 DURATION=180s ./scripts/run_experiment2_local.sh
+
+# 3. Generate charts
+python scripts/plot_experiment2.py \
+  --hot-csv   scripts/results/exp2_<timestamp>/hot/locust_stats.csv \
+  --multi-csv scripts/results/exp2_<timestamp>/multi/locust_stats.csv \
+  --hot-history   scripts/results/exp2_<timestamp>/hot/locust_stats_history.csv \
+  --multi-history scripts/results/exp2_<timestamp>/multi/locust_stats_history.csv
+```
+
+Charts are saved to `report/figures/exp2/`.
+
+**Results (500 users, LocalStack)**
+
+| Metric                  | Hot Room    | Multi Room  |
+| ----------------------- | ----------- | ----------- |
+| Total Throughput        | 298.2 req/s | 278.5 req/s |
+| Avg Latency             | 994 ms      | 1112 ms     |
+| p99 Latency (reactions) | 1550 ms     | 2100 ms     |
+| Error Rate              | 0%          | 0%          |
+
+**Key finding:** Under LocalStack (no real DynamoDB partition limits), the hot room scenario outperformed multi room by 7% throughput and 35% lower p99 latency. This counterintuitive result is explained by application-layer locality — a single room means one hub map entry with less mutex contention, versus 100 entries with higher lock overhead. The time-series data confirms this: multi room throughput degrades from ~340 to ~250 req/s over 180 seconds, while hot room stays stable at ~300 req/s.
+
+In production AWS DynamoDB, we expect this to reverse at higher loads when the single partition hits the 1,000 WCU/s throttling ceiling.
+
+---
 
 ### Experiment 3 (sync vs async reactions)
 

@@ -1,0 +1,13 @@
+# Experiment 2 (Hot-Room vs Multi-Room): use with main compose file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.exp2-overrides.yml up -d --build
+#
+# Disables rate limiting so DynamoDB partition behavior is the bottleneck, not Redis.
+# Sets async reaction mode to keep the reaction pipeline consistent.
+
+services:
+  backend:
+    environment:
+      RATE_LIMIT_RPS: "0"
+      REACTION_MODE: "async"
+      CACHE_ENABLED: "false"   # bypass Redis cache so every read hits DynamoDB
