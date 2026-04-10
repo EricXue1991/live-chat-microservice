@@ -1,96 +1,184 @@
-# LiveChat Infrastructure — Terraform
-# Components: PostgreSQL (RDS), Redis (ElastiCache), DynamoDB, SQS, SNS, S3, ECS, ALB, ECR
-# Note: Kafka uses Amazon MSK in production, but may not be available in AWS Academy.
-#       For Academy labs, run Kafka on an EC2 instance or use docker-compose locally.
+# LiveChat Infrastructure — Terraform (AWS Academy Learner Lab)
 
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
   }
 }
 
-provider "aws" { region = var.aws_region }
+provider "aws" {
+  region = var.aws_region
+}
 
 # ========== Variables ==========
 
-variable "aws_region"     { default = "us-east-1" }
-variable "project_name"   { default = "livechat" }
-variable "replica_count"  { default = 2 }
-variable "jwt_secret"     { default = "change-this-in-production"; sensitive = true }
-variable "reaction_mode"  { default = "async" }
-variable "cache_enabled"  { default = "true" }
-variable "rate_limit_rps" { default = "20" }
-variable "db_password"    { default = "livechat2024!"; sensitive = true }
+variable "aws_region" {
+  default = "us-east-1"
+}
+
+variable "project_name" {
+  default = "livechat"
+}
+
+variable "replica_count" {
+  default = 2
+}
+
+variable "jwt_secret" {
+  default   = "change-this-in-production"
+  sensitive = true
+}
+
+variable "reaction_mode" {
+  default = "async"
+}
+
+variable "cache_enabled" {
+  default = "true"
+}
+
+variable "rate_limit_rps" {
+  default = "20"
+}
+
+variable "db_password" {
+  default   = "livechat2024!"
+  sensitive = true
+}
+
+variable "lab_role_arn" {
+  default = "arn:aws:iam::472047710842:role/LabRole"
+}
 
 data "aws_caller_identity" "current" {}
-data "aws_vpc" "default" { default = true }
+
+data "aws_vpc" "default" {
+  default = true
+}
+
 data "aws_subnets" "default" {
-  filter { name = "vpc-id"; values = [data.aws_vpc.default.id] }
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
 }
 
 # ========== PostgreSQL (RDS) ==========
 
 resource "aws_db_instance" "postgres" {
-  identifier           = "${var.project_name}-pg"
-  engine               = "postgres"
-  engine_version       = "16"
-  instance_class       = "db.t3.micro"
-  allocated_storage    = 20
-  db_name              = "livechat"
-  username             = "livechat"
-  password             = var.db_password
-  skip_final_snapshot  = true
-  publicly_accessible  = true
+  identifier             = "${var.project_name}-pg"
+  engine                 = "postgres"
+  engine_version         = "16"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  db_name                = "livechat"
+  username               = "livechat"
+  password               = var.db_password
+  skip_final_snapshot    = true
+  publicly_accessible    = true
   vpc_security_group_ids = [aws_security_group.db.id]
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_security_group" "db" {
   name_prefix = "${var.project_name}-db-"
   vpc_id      = data.aws_vpc.default.id
-  ingress { from_port = 5432; to_port = 5432; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 # ========== Redis (ElastiCache) ==========
 
 resource "aws_elasticache_cluster" "redis" {
-  cluster_id           = "${var.project_name}-redis"
-  engine               = "redis"
-  node_type            = "cache.t3.micro"
-  num_cache_nodes      = 1
-  port                 = 6379
-  security_group_ids   = [aws_security_group.redis.id]
-  tags = { Project = var.project_name }
+  cluster_id         = "${var.project_name}-redis"
+  engine             = "redis"
+  node_type          = "cache.t3.micro"
+  num_cache_nodes    = 1
+  port               = 6379
+  security_group_ids = [aws_security_group.redis.id]
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_security_group" "redis" {
   name_prefix = "${var.project_name}-redis-"
   vpc_id      = data.aws_vpc.default.id
-  ingress { from_port = 6379; to_port = 6379; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+
+  ingress {
+    from_port   = 6379
+    to_port     = 6379
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 # ========== DynamoDB ==========
 
 resource "aws_dynamodb_table" "messages" {
-  name = "${var.project_name}-messages"
+  name         = "${var.project_name}-messages"
   billing_mode = "PAY_PER_REQUEST"
-  hash_key  = "room_id"
-  range_key = "sort_key"
-  attribute { name = "room_id";  type = "S" }
-  attribute { name = "sort_key"; type = "S" }
-  tags = { Project = var.project_name }
+  hash_key     = "room_id"
+  range_key    = "sort_key"
+
+  attribute {
+    name = "room_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "sort_key"
+    type = "S"
+  }
+
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_dynamodb_table" "reactions" {
-  name = "${var.project_name}-reactions"
+  name         = "${var.project_name}-reactions"
   billing_mode = "PAY_PER_REQUEST"
-  hash_key  = "room_id"
-  range_key = "reaction_type"
-  attribute { name = "room_id";       type = "S" }
-  attribute { name = "reaction_type"; type = "S" }
-  tags = { Project = var.project_name }
+  hash_key     = "room_id"
+  range_key    = "reaction_type"
+
+  attribute {
+    name = "room_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "reaction_type"
+    type = "S"
+  }
+
+  tags = {
+    Project = var.project_name
+  }
 }
 
 # ========== S3 ==========
@@ -98,11 +186,14 @@ resource "aws_dynamodb_table" "reactions" {
 resource "aws_s3_bucket" "attachments" {
   bucket        = "${var.project_name}-attach-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_s3_bucket_cors_configuration" "attachments" {
   bucket = aws_s3_bucket.attachments.id
+
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["GET", "PUT", "POST"]
@@ -115,21 +206,27 @@ resource "aws_s3_bucket_cors_configuration" "attachments" {
 
 resource "aws_sns_topic" "broadcast" {
   name = "${var.project_name}-broadcast"
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_sqs_queue" "reactions" {
-  name = "${var.project_name}-reactions"
+  name                       = "${var.project_name}-reactions"
   visibility_timeout_seconds = 30
   receive_wait_time_seconds  = 20
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_sqs_queue" "broadcast" {
-  name = "${var.project_name}-broadcast"
+  name                       = "${var.project_name}-broadcast"
   visibility_timeout_seconds = 10
   receive_wait_time_seconds  = 20
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_sns_topic_subscription" "broadcast_sqs" {
@@ -143,11 +240,15 @@ resource "aws_sqs_queue_policy" "broadcast" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = { Service = "sns.amazonaws.com" }
-      Action = "sqs:SendMessage"
-      Resource = aws_sqs_queue.broadcast.arn
-      Condition = { ArnEquals = { "aws:SourceArn" = aws_sns_topic.broadcast.arn } }
+      Action    = "sqs:SendMessage"
+      Resource  = aws_sqs_queue.broadcast.arn
+      Condition = {
+        ArnEquals = {
+          "aws:SourceArn" = aws_sns_topic.broadcast.arn
+        }
+      }
     }]
   })
 }
@@ -157,15 +258,39 @@ resource "aws_sqs_queue_policy" "broadcast" {
 resource "aws_security_group" "api" {
   name_prefix = "${var.project_name}-api-"
   vpc_id      = data.aws_vpc.default.id
-  ingress { from_port = 8080; to_port = 8080; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 resource "aws_security_group" "alb" {
   name_prefix = "${var.project_name}-alb-"
   vpc_id      = data.aws_vpc.default.id
-  ingress { from_port = 80; to_port = 80; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 # ========== ALB ==========
@@ -176,7 +301,9 @@ resource "aws_lb" "api" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = data.aws_subnets.default.ids
-  tags = { Project = var.project_name }
+  tags = {
+    Project = var.project_name
+  }
 }
 
 resource "aws_lb_target_group" "api" {
@@ -185,105 +312,83 @@ resource "aws_lb_target_group" "api" {
   protocol    = "HTTP"
   vpc_id      = data.aws_vpc.default.id
   target_type = "ip"
-  health_check { path = "/health"; healthy_threshold = 2; interval = 30 }
+
+  health_check {
+    path              = "/health"
+    healthy_threshold = 2
+    interval          = 30
+  }
 }
 
 resource "aws_lb_listener" "api" {
   load_balancer_arn = aws_lb.api.arn
-  port = 80; protocol = "HTTP"
-  default_action { type = "forward"; target_group_arn = aws_lb_target_group.api.arn }
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api.arn
+  }
 }
 
-# ========== ECS ==========
-
-resource "aws_ecs_cluster" "main" {
-  name = "${var.project_name}-cluster"
-  tags = { Project = var.project_name }
-}
-
-resource "aws_iam_role" "ecs_execution" {
-  name = "${var.project_name}-ecs-exec"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{ Effect = "Allow"; Principal = { Service = "ecs-tasks.amazonaws.com" }; Action = "sts:AssumeRole" }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_execution" {
-  role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-resource "aws_iam_role" "ecs_task" {
-  name = "${var.project_name}-ecs-task"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{ Effect = "Allow"; Principal = { Service = "ecs-tasks.amazonaws.com" }; Action = "sts:AssumeRole" }]
-  })
-}
-
-resource "aws_iam_role_policy" "ecs_task" {
-  name = "${var.project_name}-task-policy"
-  role = aws_iam_role.ecs_task.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:Query","dynamodb:BatchWriteItem"]
-        Resource = [aws_dynamodb_table.messages.arn, aws_dynamodb_table.reactions.arn]
-      },
-      { Effect = "Allow"; Action = ["sns:Publish"]; Resource = [aws_sns_topic.broadcast.arn] },
-      {
-        Effect = "Allow"
-        Action = ["sqs:SendMessage","sqs:ReceiveMessage","sqs:DeleteMessage","sqs:DeleteMessageBatch"]
-        Resource = [aws_sqs_queue.reactions.arn, aws_sqs_queue.broadcast.arn]
-      },
-      { Effect = "Allow"; Action = ["s3:PutObject","s3:GetObject"]; Resource = ["${aws_s3_bucket.attachments.arn}/*"] },
-    ]
-  })
-}
-
-resource "aws_cloudwatch_log_group" "api" {
-  name = "/ecs/${var.project_name}"
-  retention_in_days = 7
-}
+# ========== ECR ==========
 
 resource "aws_ecr_repository" "api" {
   name         = "${var.project_name}-api"
   force_delete = true
 }
 
+# ========== ECS (uses LabRole) ==========
+
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_cloudwatch_log_group" "api" {
+  name              = "/ecs/${var.project_name}"
+  retention_in_days = 7
+}
+
 resource "aws_ecs_task_definition" "api" {
   family                   = "${var.project_name}-api"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu = "512"; memory = "1024"
-  execution_role_arn = aws_iam_role.ecs_execution.arn
-  task_role_arn      = aws_iam_role.ecs_task.arn
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = var.lab_role_arn
+  task_role_arn            = var.lab_role_arn
 
   container_definitions = jsonencode([{
-    name = "${var.project_name}-api"
-    image = "${aws_ecr_repository.api.repository_url}:latest"
+    name      = "${var.project_name}-api"
+    image     = "${aws_ecr_repository.api.repository_url}:latest"
     essential = true
-    portMappings = [{ containerPort = 8080; protocol = "tcp" }]
+
+    portMappings = [{
+      containerPort = 8080
+      protocol      = "tcp"
+    }]
+
     environment = [
-      { name = "PORT";                      value = "8080" },
-      { name = "AWS_REGION";                value = var.aws_region },
-      { name = "POSTGRES_DSN";              value = "postgres://livechat:${var.db_password}@${aws_db_instance.postgres.endpoint}/livechat?sslmode=disable" },
-      { name = "REDIS_ADDR";                value = "${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
-      { name = "KAFKA_BROKERS";             value = "" },  # Set manually if using MSK/EC2 Kafka
-      { name = "DYNAMODB_MESSAGES_TABLE";   value = aws_dynamodb_table.messages.name },
-      { name = "DYNAMODB_REACTIONS_TABLE";  value = aws_dynamodb_table.reactions.name },
-      { name = "S3_BUCKET";                 value = aws_s3_bucket.attachments.id },
-      { name = "SNS_TOPIC_ARN";            value = aws_sns_topic.broadcast.arn },
-      { name = "SQS_REACTION_QUEUE_URL";   value = aws_sqs_queue.reactions.url },
-      { name = "SQS_BROADCAST_QUEUE_URL";  value = aws_sqs_queue.broadcast.url },
-      { name = "JWT_SECRET";               value = var.jwt_secret },
-      { name = "REACTION_MODE";            value = var.reaction_mode },
-      { name = "CACHE_ENABLED";            value = var.cache_enabled },
-      { name = "RATE_LIMIT_RPS";           value = var.rate_limit_rps },
+      { name = "PORT",                     value = "8080" },
+      { name = "AWS_REGION",               value = var.aws_region },
+      { name = "POSTGRES_DSN", value = "postgres://livechat:${var.db_password}@${aws_db_instance.postgres.endpoint}/livechat?sslmode=require" },
+      { name = "REDIS_ADDR",               value = "${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
+      { name = "KAFKA_BROKERS",            value = "" },
+      { name = "DYNAMODB_MESSAGES_TABLE",  value = aws_dynamodb_table.messages.name },
+      { name = "DYNAMODB_REACTIONS_TABLE", value = aws_dynamodb_table.reactions.name },
+      { name = "S3_BUCKET",                value = aws_s3_bucket.attachments.id },
+      { name = "SNS_TOPIC_ARN",            value = aws_sns_topic.broadcast.arn },
+      { name = "SQS_REACTION_QUEUE_URL",   value = aws_sqs_queue.reactions.url },
+      { name = "SQS_BROADCAST_QUEUE_URL",  value = aws_sqs_queue.broadcast.url },
+      { name = "JWT_SECRET",               value = var.jwt_secret },
+      { name = "REACTION_MODE",            value = var.reaction_mode },
+      { name = "CACHE_ENABLED",            value = var.cache_enabled },
+      { name = "RATE_LIMIT_RPS",           value = var.rate_limit_rps },
     ]
+
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -319,10 +424,36 @@ resource "aws_ecs_service" "api" {
 
 # ========== Outputs ==========
 
-output "alb_dns"      { value = aws_lb.api.dns_name }
-output "ecr_repo"     { value = aws_ecr_repository.api.repository_url }
-output "postgres_host" { value = aws_db_instance.postgres.endpoint }
-output "redis_host"   { value = aws_elasticache_cluster.redis.cache_nodes[0].address }
-output "dynamodb"     { value = { messages = aws_dynamodb_table.messages.name, reactions = aws_dynamodb_table.reactions.name } }
-output "sns_topic"    { value = aws_sns_topic.broadcast.arn }
-output "sqs_queues"   { value = { reactions = aws_sqs_queue.reactions.url, broadcast = aws_sqs_queue.broadcast.url } }
+output "alb_dns" {
+  value = aws_lb.api.dns_name
+}
+
+output "ecr_repo" {
+  value = aws_ecr_repository.api.repository_url
+}
+
+output "postgres_host" {
+  value = aws_db_instance.postgres.endpoint
+}
+
+output "redis_host" {
+  value = aws_elasticache_cluster.redis.cache_nodes[0].address
+}
+
+output "dynamodb" {
+  value = {
+    messages  = aws_dynamodb_table.messages.name
+    reactions = aws_dynamodb_table.reactions.name
+  }
+}
+
+output "sns_topic" {
+  value = aws_sns_topic.broadcast.arn
+}
+
+output "sqs_queues" {
+  value = {
+    reactions = aws_sqs_queue.reactions.url
+    broadcast = aws_sqs_queue.broadcast.url
+  }
+}
