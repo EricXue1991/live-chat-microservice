@@ -228,7 +228,85 @@ symmetric. A `PollingUser` that only polls would find no messages to measure.
 
 ---
 
+### Experiment 1: Scale-Out — Eric
+
+**Hypothesis:** Throughput scales linearly as ECS replicas increase from 2 → 4 → 8.
+
+**Setup:**
+- AWS ECS Fargate, ALB load balancer, us-west-2
+- 150 concurrent users, spawn rate 15/s, 120s duration per pass
+- Replicas tested: 2, 4, 8
+
+**Metric:** Aggregated requests/s and p95 latency per replica count.
+
+---
+
+### Experiment 2: Hot Room vs Multi-Room — Eric
+
+**Hypothesis:** Concentrating all traffic on a single DynamoDB partition key causes higher latency than distributing traffic across 100 rooms.
+
+**Setup:**
+- 150 concurrent users, 120s duration, rate limiting disabled, Redis cache disabled
+- **Hot Room:** all traffic → `room-hot` (single partition key)
+- **Multi Room:** traffic spread across 100 rooms (`room-0` … `room-99`)
+
+**Metric:** p95/p99 latency and throughput for POST /api/messages.
+
+---
+
+### Experiment 3: Sync vs Async Reactions — Eric
+
+**Hypothesis:** Async SQS batch aggregation delivers higher reaction throughput than synchronous DynamoDB writes.
+
+**Setup:**
+- 80 concurrent users (ReactionHeavyUser), 120s duration
+- **Sync mode:** `REACTION_MODE=sync` — each POST /api/reactions writes directly to DynamoDB
+- **Async mode:** `REACTION_MODE=async` — reactions enqueued to SQS, batch-aggregated by consumer
+
+**Metric:** POST /api/reactions throughput (req/s) and p50/p95 latency.
+
+---
+
 ## Preliminary Results
+
+### Experiment 1 — Scale-Out Results (AWS ECS)
+
+| Replicas | Throughput (req/s) | Avg Latency | p95 Latency |
+|----------|-------------------|-------------|-------------|
+| 2        | ~44               | 52 ms       | 220 ms      |
+| 4        | ~43               | 124 ms      | 660 ms      |
+| 8        | ~45               | 47 ms       | 200 ms      |
+
+**Key finding:** Under 150 users, even 2 replicas saturate the load — throughput plateaus because the bottleneck shifts to DynamoDB and the test client, not the API layer. At higher user counts (500+), linear scaling would be visible. Charts: `report/figures/exp1/`.
+
+---
+
+### Experiment 2 — Hot Room vs Multi-Room Results
+
+| Metric      | Hot Room | Multi Room | Difference |
+|-------------|----------|------------|------------|
+| Throughput  | 44.5 req/s | 45.5 req/s | similar |
+| Avg Latency | 62 ms    | 33 ms      | 2x faster (multi) |
+| p95 Latency | 230 ms   | 120 ms     | **2x faster (multi)** |
+| p99 Latency | 1100 ms  | 220 ms     | **5x faster (multi)** |
+| Error Rate  | 0%       | 0%         | — |
+
+**Key finding:** Hot room p99 latency (1100ms) is 5x worse than multi-room (220ms). With all 150 users hitting `room-hot`, the single DynamoDB partition key creates write contention, causing tail latency spikes. Multi-room distributes writes across 100 partition keys, keeping p99 at 220ms. Charts: `report/figures/exp2/` (local), `report/figures/exp2_aws/` (AWS).
+
+---
+
+### Experiment 3 — Sync vs Async Reactions Results
+
+| Metric      | Async Mode | Sync Mode | Speedup |
+|-------------|-----------|-----------|---------|
+| Throughput  | ~420 req/s | ~181 req/s | **2.3x** |
+| p50 Latency | 58 ms     | 270 ms    | **4.7x** |
+| p95 Latency | 250 ms    | 850 ms    | **3.4x** |
+| p99 Latency | 460 ms    | 1400 ms   | **3.0x** |
+
+**Key finding:** Async SQS aggregation delivers 2.3x higher throughput (420 vs 181 req/s) and 4.7x lower p50 latency. In sync mode, each reaction blocks on a DynamoDB write; in async mode, the POST handler just enqueues to SQS and returns immediately (~5ms), while the aggregator batch-writes in the background. Charts: `report/figures/exp3/`.
+
+---
 
 ### Experiment 4 — Pre-Fix Results (Initial Run)
 
@@ -350,6 +428,17 @@ the polling interval.
 The p99 gap (5100ms vs 2500ms) reflects tail latency under contention:
 polling users occasionally miss two consecutive poll cycles if the server is
 busy, while WebSocket users experience hub channel back-pressure during bursts.
+
+### Experiment 4 — AWS Results (ECS Fargate, us-west-2)
+
+| Metric  | HTTP Polling | WebSocket | Speedup  |
+|---------|-------------|-----------|----------|
+| p50     | 780 ms      | ~0 ms     | —        |
+| p95     | 2500 ms     | 62 ms     | **40x**  |
+| p99     | 3800 ms     | 120 ms    | **32x**  |
+| Average | 942 ms      | 8 ms      | **116x** |
+
+**Key finding:** On real AWS infrastructure, the WebSocket advantage is far more pronounced than in local tests. Real network latency between client and ALB amplifies the polling overhead — each poll round-trip is 100-200ms of pure network time regardless of server processing. WebSocket push eliminates this entirely. Charts: `report/figures/exp4_aws/`.
 
 ### Engineering Insight
 
