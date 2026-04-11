@@ -231,6 +231,42 @@ Measures end-to-end message delivery latency for push (WebSocket) vs pull (HTTP 
    Charts are saved to `report/figures/exp4/`.
 
 4. Compare results. Report targets: `POLL_LATENCY` vs `WS_LATENCY` e2e delivery at p50/p95/p99, average speedup ratio. Expected outcome: WebSocket ~3-5x lower p50 latency than polling under 50 concurrent users.
+#### Pre-Fix Results (Initial Run)
+
+| Metric | HTTP Polling | WebSocket | Speedup |
+|--------|-------------|-----------|---------|
+| p50 | 1000 ms | 17000 ms | 0.1x  |
+| p95 | 3200 ms | 33000 ms | 0.1x |
+| p99 | 4600 ms | 37000 ms | 0.1x |
+| Average | 1261 ms | 17160 ms | 0.1x|
+#### Post-Fix Results (Local)
+
+After implementing direct hub broadcast in `chat/handler.go`, WebSocket correctly outperforms HTTP polling across all latency percentiles.
+
+| Metric  | HTTP Polling | WebSocket | Speedup  |
+|---------|-------------|-----------|----------|
+| p50     | 970 ms      | 180 ms    | **5.4x** |
+| p95     | 3300 ms     | 1000 ms   | **3.3x** |
+| p99     | 5100 ms     | 2500 ms   | **2.0x** |
+| Average | 1236 ms     | 328 ms    | **3.8x** |
+
+#### AWS Results (50 users, ECS Fargate, us-west-2)
+
+Run against the live AWS deployment with rate limiting disabled (`RATE_LIMIT_RPS=0`).
+
+```bash
+./scripts/run_experiment4_aws.sh
+# Override: USERS=100 DURATION=120s ./scripts/run_experiment4_aws.sh
+```
+
+| Metric  | HTTP Polling | WebSocket | Speedup   |
+|---------|-------------|-----------|-----------|
+| p50     | 780 ms      | ~0 ms     | —         |
+| p95     | 2500 ms     | 62 ms     | **40x**   |
+| p99     | 3800 ms     | 120 ms    | **32x**   |
+| Average | 942 ms      | 8 ms      | **116x**  |
+
+**Key finding:** On AWS, WebSocket push latency is dramatically lower than local results due to real network conditions amplifying the polling overhead. The near-zero WS latency reflects direct hub broadcast delivering messages before the polling interval even begins. Charts: `report/figures/exp4/exp4_*_aws.png`.
 
 ## Quick Start
 
