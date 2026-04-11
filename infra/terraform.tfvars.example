@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (gitignored):
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# NEVER paste example account id 123456789012 into ARNs — use `aws sts get-caller-identity` Account,
+# or omit lab_role_arn / ecs_*_role_arn so Terraform resolves LabRole automatically.
+#
+# Pick ONE region for the whole stack; after the first successful apply, do not change aws_region
+# unless you destroy resources or use a new state — otherwise refresh/plan will fail (ARN region mismatch).
+aws_region = "us-east-1"
+#
+# --- If `terraform apply` fails on aws_ecs_task_definition with "Role is not valid" ---
+# 1) Trust: LabRole must include ecs-tasks.amazonaws.com (you already have this).
+# 2) Execution role policy: attach AWS managed "AmazonECSTaskExecutionRolePolicy" to LabRole if missing:
+#      aws iam list-attached-role-policies --role-name LabRole
+# 3) Your CLI user must be allowed to iam:PassRole that role to ECS (Vocareum sometimes restricts).
+# 4) Terraform now resolves LabRole via IAM API; run `terraform plan` and check output ecs_roles_resolved after apply.
+# Optional overrides:
+# ecs_fargate_role_arn   = "arn:aws:iam::123456789012:role/..."
+# ecs_execution_role_arn = "..."  # split execution vs task if your lab requires it
+# ecs_task_role_arn      = "..."
+#
+# jwt_secret / db_password optional — omit to use main.tf defaults (lab only).

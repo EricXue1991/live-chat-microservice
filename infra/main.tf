@@ -49,11 +49,67 @@ variable "db_password" {
   sensitive = true
 }
 
+# AWS Academy: iam:CreateRole is denied. ECS Fargate still needs a role whose trust policy includes
+# ecs-tasks.amazonaws.com. LabRole often does NOT — then RegisterTaskDefinition returns "Role is not valid".
 variable "lab_role_arn" {
-  default = "arn:aws:iam::472047710842:role/LabRole"
+  type        = string
+  default     = ""
+  description = "Fallback when ecs_fargate_role_arn is unset: default arn:aws:iam::<current account>:role/LabRole"
+
+  validation {
+    condition     = !can(regex("123456789012", var.lab_role_arn))
+    error_message = "lab_role_arn must not use the example placeholder account 123456789012. Delete this line to auto-resolve LabRole, or use your 12-digit Account from: aws sts get-caller-identity"
+  }
+}
+
+# Set this when LabRole is rejected (see terraform.tfvars.example). Must trust ecs-tasks.amazonaws.com.
+variable "ecs_fargate_role_arn" {
+  type        = string
+  default     = ""
+  description = "Override IAM ARN for both ECS execution + task role (use canonical ARN from IAM console)."
+
+  validation {
+    condition     = !can(regex("123456789012", var.ecs_fargate_role_arn))
+    error_message = "ecs_fargate_role_arn must not use placeholder account 123456789012; use your real Account id."
+  }
+}
+
+# Optional: use different roles if your lab requires it (default = same resolved LabRole for both).
+variable "ecs_execution_role_arn" {
+  type        = string
+  default     = ""
+  description = "Override execution role only (leave empty to use ecs_fargate_role_arn / LabRole)."
+
+  validation {
+    condition     = !can(regex("123456789012", var.ecs_execution_role_arn))
+    error_message = "ecs_execution_role_arn must not use placeholder account 123456789012."
+  }
+}
+
+variable "ecs_task_role_arn" {
+  type        = string
+  default     = ""
+  description = "Override task role only (leave empty to use ecs_fargate_role_arn / LabRole)."
+
+  validation {
+    condition     = !can(regex("123456789012", var.ecs_task_role_arn))
+    error_message = "ecs_task_role_arn must not use placeholder account 123456789012."
+  }
 }
 
 data "aws_caller_identity" "current" {}
+
+# Resolve LabRole ARN from IAM API (correct path/ARN format; avoids hand-typed ARN typos).
+data "aws_iam_role" "lab" {
+  name = "LabRole"
+}
+
+locals {
+  lab_default_arn = trimspace(var.lab_role_arn) != "" ? trimspace(var.lab_role_arn) : data.aws_iam_role.lab.arn
+  ecs_primary_arn = trimspace(var.ecs_fargate_role_arn) != "" ? trimspace(var.ecs_fargate_role_arn) : local.lab_default_arn
+  ecs_exec_arn    = trimspace(var.ecs_execution_role_arn) != "" ? trimspace(var.ecs_execution_role_arn) : local.ecs_primary_arn
+  ecs_task_arn    = trimspace(var.ecs_task_role_arn) != "" ? trimspace(var.ecs_task_role_arn) : local.ecs_primary_arn
+}
 
 data "aws_vpc" "default" {
   default = true
@@ -358,8 +414,8 @@ resource "aws_ecs_task_definition" "api" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = "512"
   memory                   = "1024"
-  execution_role_arn       = var.lab_role_arn
-  task_role_arn            = var.lab_role_arn
+  execution_role_arn       = local.ecs_exec_arn
+  task_role_arn            = local.ecs_task_arn
 
   container_definitions = jsonencode([{
     name      = "${var.project_name}-api"
@@ -372,21 +428,21 @@ resource "aws_ecs_task_definition" "api" {
     }]
 
     environment = [
-      { name = "PORT",                     value = "8080" },
-      { name = "AWS_REGION",               value = var.aws_region },
+      { name = "PORT", value = "8080" },
+      { name = "AWS_REGION", value = var.aws_region },
       { name = "POSTGRES_DSN", value = "postgres://livechat:${var.db_password}@${aws_db_instance.postgres.endpoint}/livechat?sslmode=require" },
-      { name = "REDIS_ADDR",               value = "${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
-      { name = "KAFKA_BROKERS",            value = "" },
-      { name = "DYNAMODB_MESSAGES_TABLE",  value = aws_dynamodb_table.messages.name },
+      { name = "REDIS_ADDR", value = "${aws_elasticache_cluster.redis.cache_nodes[0].address}:6379" },
+      { name = "KAFKA_BROKERS", value = "" },
+      { name = "DYNAMODB_MESSAGES_TABLE", value = aws_dynamodb_table.messages.name },
       { name = "DYNAMODB_REACTIONS_TABLE", value = aws_dynamodb_table.reactions.name },
-      { name = "S3_BUCKET",                value = aws_s3_bucket.attachments.id },
-      { name = "SNS_TOPIC_ARN",            value = aws_sns_topic.broadcast.arn },
-      { name = "SQS_REACTION_QUEUE_URL",   value = aws_sqs_queue.reactions.url },
-      { name = "SQS_BROADCAST_QUEUE_URL",  value = aws_sqs_queue.broadcast.url },
-      { name = "JWT_SECRET",               value = var.jwt_secret },
-      { name = "REACTION_MODE",            value = var.reaction_mode },
-      { name = "CACHE_ENABLED",            value = var.cache_enabled },
-      { name = "RATE_LIMIT_RPS",           value = var.rate_limit_rps },
+      { name = "S3_BUCKET", value = aws_s3_bucket.attachments.id },
+      { name = "SNS_TOPIC_ARN", value = aws_sns_topic.broadcast.arn },
+      { name = "SQS_REACTION_QUEUE_URL", value = aws_sqs_queue.reactions.url },
+      { name = "SQS_BROADCAST_QUEUE_URL", value = aws_sqs_queue.broadcast.url },
+      { name = "JWT_SECRET", value = var.jwt_secret },
+      { name = "REACTION_MODE", value = var.reaction_mode },
+      { name = "CACHE_ENABLED", value = var.cache_enabled },
+      { name = "RATE_LIMIT_RPS", value = var.rate_limit_rps },
     ]
 
     logConfiguration = {
@@ -455,5 +511,13 @@ output "sqs_queues" {
   value = {
     reactions = aws_sqs_queue.reactions.url
     broadcast = aws_sqs_queue.broadcast.url
+  }
+}
+
+# Debug: ARNs used in aws_ecs_task_definition (verify in IAM if RegisterTaskDefinition says "Role is not valid").
+output "ecs_roles_resolved" {
+  value = {
+    execution_role_arn = local.ecs_exec_arn
+    task_role_arn      = local.ecs_task_arn
   }
 }

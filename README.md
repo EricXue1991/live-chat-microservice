@@ -169,7 +169,7 @@ Charts are saved to `report/figures/exp2_aws/`.
 
 ### Experiment 3 (sync vs async reactions)
 
-1. Bring the stack up with relaxed rate limits so reactions are the bottleneck:
+1. Bring the stack up with rate limiting off and cache disabled so reactions are the bottleneck (aligned with AWS `run_experiment3_aws.sh`):
 
    `REACTION_MODE=async docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build`
 
@@ -182,6 +182,27 @@ Charts are saved to `report/figures/exp2_aws/`.
 3. Repeat with sync mode (restart backend): `REACTION_MODE=sync` in the same `docker compose ...` command.
 
 4. Compare Locust CSVs under `scripts/results/` and optional `GET /api/status` fields `reaction_queue_visible` / `reaction_queue_inflight` (async only). Report targets: POST `/api/reactions` throughput and p95/p99, DynamoDB pressure, queue backlog in async mode.
+
+**How to run (AWS ECS)**
+
+Same idea as Experiments 1–2: Locust hits the deployed ALB; the script temporarily sets `RATE_LIMIT_RPS=0`, `CACHE_ENABLED=false` (as in experiment 2 AWS), then runs **async** then **sync** via new ECS task definitions, then restores the service’s original task definition.
+
+```bash
+# Prerequisites: pip install locust matplotlib websocket-client, AWS CLI configured, stack deployed (Terraform + deploy.sh)
+./scripts/run_experiment3_aws.sh
+
+# Override defaults:
+USERS=120 DURATION=180s HOST=http://your-alb-dns.elb.amazonaws.com ./scripts/run_experiment3_aws.sh
+```
+
+Charts (saved next to Experiment 2 AWS style under `report/figures/exp3_aws/`):
+
+```bash
+python scripts/plot_experiment3.py \
+  --sync-csv   scripts/results/exp3_<timestamp>/sync/locust_stats.csv \
+  --async-csv  scripts/results/exp3_<timestamp>/async/locust_stats.csv \
+  --out-dir report/figures/exp3_aws
+```
 
 ### Experiment 4 (WebSocket vs HTTP Polling)
 

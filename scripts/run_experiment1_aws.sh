@@ -31,7 +31,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOST="${HOST:-http://livechat-alb-551256164.us-east-1.elb.amazonaws.com}"
 CLUSTER="livechat-cluster"
 SERVICE="livechat-api"
-REGION="us-east-1"
+REGION="${AWS_REGION:-us-east-1}"
 
 USERS="${USERS:-150}"
 SPAWN="${SPAWN:-15}"
