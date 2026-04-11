@@ -266,7 +266,7 @@ Run against the live AWS deployment with rate limiting disabled (`RATE_LIMIT_RPS
 | p99     | 3800 ms     | 120 ms    | **32x**   |
 | Average | 942 ms      | 8 ms      | **116x**  |
 
-**Key finding:** On AWS, WebSocket push latency is dramatically lower than local results due to real network conditions amplifying the polling overhead. The near-zero WS latency reflects direct hub broadcast delivering messages before the polling interval even begins. Charts: `report/figures/exp4/exp4_*_aws.png`.
+**Key finding:** On AWS, WebSocket push latency is dramatically lower than local results due to real network conditions amplifying the polling overhead. The near-zero WS latency reflects direct hub broadcast delivering messages before the polling interval even begins. Charts: `report/figures/exp4_aws/`.
 
 ## Quick Start
 
