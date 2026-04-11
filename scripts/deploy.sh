@@ -15,7 +15,8 @@ aws ecr get-login-password --region ${AWS_REGION} | \
   docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
 echo "[2/4] Building..."
-cd backend && docker build -t ${PROJECT}-api .
+// To be checked: 4/10 Use buildx for multi-arch support 
+cd backend && docker build --platform linux/amd64 -t ${PROJECT}-api .
 
 echo "[3/4] Pushing..."
 docker tag ${PROJECT}-api:latest ${ECR}:latest
