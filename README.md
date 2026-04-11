@@ -46,6 +46,48 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
 3. **Sync vs Async Reactions** — SQS batch aggregation benefit
 4. **WebSocket vs HTTP Polling** — push vs pull latency
 
+### Experiment 1: Scale-Out (1/2/4/8 replicas)
+
+Validates linear horizontal scaling by measuring throughput and latency as ECS Fargate replicas increase from 1 to 8 behind an Application Load Balancer.
+
+**Setup**
+
+- 150 simulated users (ChatUser), fixed load across all runs
+- Replicas tested: 1, 2, 4, 8
+- Each run: 120 seconds, 60-second cooldown between runs
+- ALB distributes traffic across replicas via round-robin
+
+**How to run (AWS)**
+
+```bash
+# Prerequisites: AWS CLI configured, Locust installed
+pip install locust matplotlib
+
+# Run full experiment (automatically scales ECS 1→2→4→8, restores to 2 after)
+./scripts/run_experiment1_aws.sh
+
+# Override defaults:
+USERS=200 DURATION=180s ./scripts/run_experiment1_aws.sh
+
+# Generate charts
+python scripts/plot_experiment1.py --results-dir scripts/results/exp1_<timestamp>
+```
+
+Charts are saved to `report/figures/exp1/`.
+
+**Results (150 users, AWS ECS Fargate)**
+
+| Replicas | Throughput (req/s) | Avg Latency (ms) | p95 (ms) | p99 (ms) | Error Rate | Scaling Efficiency |
+| -------- | ------------------ | ---------------- | -------- | -------- | ---------- | ------------------ |
+| 1        | 38.2               | 1289             | 14000    | 22000    | 4.22%      | 100%               |
+| 2        | 55.2               | 347              | 120      | 9500     | 3.8%       | 72.3%              |
+| 4        | 56.5               | 323              | 110      | 8800     | 3.5%       | 37.0%              |
+| 8        | 57.0               | 312              | 110      | 8500     | 3.2%       | 18.7%              |
+
+**Key finding:** Scaling from 1→2 replicas yields a significant improvement (~44% throughput gain, ~73% latency reduction). However, beyond 2 replicas the gains plateau — throughput stabilizes around 55-57 req/s. This indicates the bottleneck shifts from compute to shared backend resources (PostgreSQL connections during registration, DynamoDB throughput, ALB connection handling). The high p99 latency across all configurations is driven by the initial registration/login burst hitting PostgreSQL.
+
+---
+
 ### Experiment 2: Hot-Room vs Multi-Room
 
 Measures the impact of concentrated traffic on a single DynamoDB partition key vs traffic distributed across 100 partition keys.
@@ -92,11 +134,42 @@ Charts are saved to `report/figures/exp2/`.
 
 In production AWS DynamoDB, we expect this to reverse at higher loads when the single partition hits the 1,000 WCU/s throttling ceiling.
 
+**How to run (AWS ECS)**
+
+```bash
+# Run against deployed ALB (auto-disables rate limit & cache, restores after)
+./scripts/run_experiment2_aws.sh
+
+# Override defaults:
+USERS=200 DURATION=180s HOST=http://your-alb-dns ./scripts/run_experiment2_aws.sh
+
+# Generate charts (saved to report/figures/exp2_aws/ to preserve local results)
+python scripts/plot_experiment2.py \
+  --hot-csv   scripts/results/exp2_<timestamp>/hot/locust_stats.csv \
+  --multi-csv scripts/results/exp2_<timestamp>/multi/locust_stats.csv \
+  --hot-history   scripts/results/exp2_<timestamp>/hot/locust_stats_history.csv \
+  --multi-history scripts/results/exp2_<timestamp>/multi/locust_stats_history.csv \
+  --out-dir report/figures/exp2_aws
+```
+
+Charts are saved to `report/figures/exp2_aws/`.
+
+**Results (150 users, AWS ECS + real DynamoDB)**
+
+| Metric           | Hot Room   | Multi Room |
+| ---------------- | ---------- | ---------- |
+| Total Throughput | 52.3 req/s | 54.8 req/s |
+| Avg Latency      | 186 ms     | 142 ms     |
+| p99 Latency      | 9200 ms    | 6800 ms    |
+| Error Rate       | 4.1%       | 3.6%       |
+
+**Key finding (AWS):** On real AWS DynamoDB, the results flip compared to LocalStack — multi-room outperforms hot-room by ~5% in throughput with 24% lower average latency and 26% lower p99. This validates the DynamoDB partition key design: concentrating all writes on a single partition key (`room-hot`) creates contention at the storage layer, while distributing across 100 partition keys allows DynamoDB to parallelize writes across multiple physical partitions. The error rate difference (4.1% vs 3.6%) further confirms that the hot partition experiences more throttling under load.
+
 ---
 
 ### Experiment 3 (sync vs async reactions)
 
-1. Bring the stack up with relaxed rate limits so reactions are the bottleneck:
+1. Bring the stack up with rate limiting off and cache disabled so reactions are the bottleneck (aligned with AWS `run_experiment3_aws.sh`):
 
    `REACTION_MODE=async docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build`
 
@@ -109,6 +182,27 @@ In production AWS DynamoDB, we expect this to reverse at higher loads when the s
 3. Repeat with sync mode (restart backend): `REACTION_MODE=sync` in the same `docker compose ...` command.
 
 4. Compare Locust CSVs under `scripts/results/` and optional `GET /api/status` fields `reaction_queue_visible` / `reaction_queue_inflight` (async only). Report targets: POST `/api/reactions` throughput and p95/p99, DynamoDB pressure, queue backlog in async mode.
+
+**How to run (AWS ECS)**
+
+Same idea as Experiments 1–2: Locust hits the deployed ALB; the script temporarily sets `RATE_LIMIT_RPS=0`, `CACHE_ENABLED=false` (as in experiment 2 AWS), then runs **async** then **sync** via new ECS task definitions, then restores the service’s original task definition.
+
+```bash
+# Prerequisites: pip install locust matplotlib websocket-client, AWS CLI configured, stack deployed (Terraform + deploy.sh)
+./scripts/run_experiment3_aws.sh
+
+# Override defaults:
+USERS=120 DURATION=180s HOST=http://your-alb-dns.elb.amazonaws.com ./scripts/run_experiment3_aws.sh
+```
+
+Charts (saved next to Experiment 2 AWS style under `report/figures/exp3_aws/`):
+
+```bash
+python scripts/plot_experiment3.py \
+  --sync-csv   scripts/results/exp3_<timestamp>/sync/locust_stats.csv \
+  --async-csv  scripts/results/exp3_<timestamp>/async/locust_stats.csv \
+  --out-dir report/figures/exp3_aws
+```
 
 ### Experiment 4 (WebSocket vs HTTP Polling)
 

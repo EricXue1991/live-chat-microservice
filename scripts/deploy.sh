@@ -14,8 +14,9 @@ echo "[1/4] ECR login..."
 aws ecr get-login-password --region ${AWS_REGION} | \
   docker login --username AWS --password-stdin ${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-echo "[2/4] Building..."
-// To be checked: 4/10 Use buildx for multi-arch support 
+# Fargate runs linux/amd64. Builds on Apple Silicon default to arm64 and will fail at pull with:
+# "Manifest does not contain descriptor matching platform 'linux/amd64'"
+echo "[2/4] Building for linux/amd64 (Fargate)..."
 cd backend && docker build --platform linux/amd64 -t ${PROJECT}-api .
 
 echo "[3/4] Pushing..."

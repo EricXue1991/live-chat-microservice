@@ -10,6 +10,9 @@ frontend/dist/
 infra/.terraform/
 infra/*.tfstate*
 infra/.terraform.lock.hcl
+# Real variable files (secrets) — never commit. Copy from terraform.tfvars.example locally.
+infra/*.tfvars
+!infra/terraform.tfvars.example
 
 # IDE
 .idea/
@@ -20,6 +23,7 @@ infra/.terraform.lock.hcl
 .env
 *.env.local
 .venv
+.venv-plot/
 
 # Data
 scripts/results/

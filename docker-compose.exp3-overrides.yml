@@ -3,9 +3,11 @@
 #   REACTION_MODE=async docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build
 #   REACTION_MODE=sync  docker compose -f docker-compose.yml -f docker-compose.exp3-overrides.yml up -d --build
 #
-# RATE_LIMIT_RPS=0 disables per-user Redis limiting so reaction throughput reflects storage/queue behavior.
+# RATE_LIMIT_RPS=0 disables per-user Redis limiting; CACHE_ENABLED=false matches experiment 2 / AWS exp3
+# so reaction throughput reflects storage/queue behavior rather than Redis cache hits.
 services:
   backend:
     environment:
       RATE_LIMIT_RPS: "0"
+      CACHE_ENABLED: "false"
       REACTION_MODE: "${REACTION_MODE:-async}"
