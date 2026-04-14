@@ -36,3 +36,7 @@ pgdata/
 .mplconfig/
 **/__pycache__/
 *.pyc
+
+# Others
+.specstory/
+docs/

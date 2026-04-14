@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
+	"sync"
 	"time"
 
 	"livechat/internal/config"
@@ -17,6 +17,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqsTypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
+
+// reactionKey is used as a map key to aggregate counts per (room, reaction type).
+// Using a struct avoids string concatenation and '#' delimiter ambiguity.
+type reactionKey struct {
+	roomID       string
+	reactionType string
+}
 
 // Aggregator is an SQS consumer that batches reaction events into fewer DynamoDB writes.
 //
@@ -37,15 +44,33 @@ func NewAggregator(db *dynamodb.Client, sqsClient *sqs.Client, cfg *config.Confi
 	return &Aggregator{db: db, sqs: sqsClient, cfg: cfg}
 }
 
-// Start runs the aggregator receive → aggregate → flush loop until process exits.
+// Start launches N parallel worker goroutines (AGGREGATOR_WORKERS) and blocks until all exit.
+// SQS natively supports multiple consumers — each worker independently polls and flushes.
 func (a *Aggregator) Start() {
 	if a.cfg.ReactionQueueURL == "" {
 		log.Println("[AGGREGATOR] No reaction queue URL configured, skipping")
 		return
 	}
 
-	log.Println("[AGGREGATOR] Starting reaction aggregator worker")
+	workers := a.cfg.AggregatorWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	log.Printf("[AGGREGATOR] Starting %d worker(s)", workers)
 
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			a.runWorker(id)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// runWorker is the per-goroutine poll → aggregate → flush loop.
+func (a *Aggregator) runWorker(id int) {
 	for {
 		// Receive up to 10 messages per poll (SQS batch limit).
 		result, err := a.sqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
@@ -55,7 +80,7 @@ func (a *Aggregator) Start() {
 			VisibilityTimeout:   30, // allow time to flush before redelivery
 		})
 		if err != nil {
-			log.Printf("[AGGREGATOR] SQS receive error: %v", err)
+			log.Printf("[AGGREGATOR:%d] SQS receive error: %v", id, err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -64,51 +89,60 @@ func (a *Aggregator) Start() {
 			continue
 		}
 
-		// Aggregate in memory: key "roomId#reactionType" -> delta count for this batch.
-		counts := make(map[string]int64)
-		var processed []sqsTypes.DeleteMessageBatchRequestEntry
+		// Aggregate in memory: (roomID, reactionType) -> delta count for this batch.
+		counts := make(map[reactionKey]int64)
+		var validMsgs []sqsTypes.DeleteMessageBatchRequestEntry // successfully parsed, pending DynamoDB flush
+		var poisonMsgs []sqsTypes.DeleteMessageBatchRequestEntry // unparseable; delete immediately
 
 		for i, sqsMsg := range result.Messages {
+			msgID := fmt.Sprintf("msg-%d", i)
+			if sqsMsg.MessageId != nil {
+				msgID = *sqsMsg.MessageId
+			}
+			entry := sqsTypes.DeleteMessageBatchRequestEntry{
+				Id:            aws.String(msgID),
+				ReceiptHandle: sqsMsg.ReceiptHandle,
+			}
+
 			var event models.ReactionEvent
 			if err := json.Unmarshal([]byte(*sqsMsg.Body), &event); err != nil {
-				log.Printf("[AGGREGATOR] unmarshal error: %v", err)
+				log.Printf("[AGGREGATOR:%d] unmarshal error, discarding message %s: %v", id, msgID, err)
+				poisonMsgs = append(poisonMsgs, entry)
 				continue
 			}
 			if event.RoomID == "" || event.ReactionType == "" {
-				log.Printf("[AGGREGATOR] skip event with empty room_id or reaction_type")
+				log.Printf("[AGGREGATOR:%d] missing room_id or reaction_type, discarding message %s", id, msgID)
+				poisonMsgs = append(poisonMsgs, entry)
 				continue
 			}
 
-			// Merge counts for the same room + reactionType.
-			key := event.RoomID + "#" + event.ReactionType
-			counts[key]++
-
-			// Track SQS receipts to delete after a successful flush.
-			id := fmt.Sprintf("msg-%d", i)
-			if sqsMsg.MessageId != nil {
-				id = *sqsMsg.MessageId
-			}
-			processed = append(processed, sqsTypes.DeleteMessageBatchRequestEntry{
-				Id:            aws.String(id),
-				ReceiptHandle: sqsMsg.ReceiptHandle,
-			})
+			counts[reactionKey{event.RoomID, event.ReactionType}]++
+			validMsgs = append(validMsgs, entry)
 		}
 
-		// Flush to DynamoDB in a single transaction (all keys succeed or none).
-		// Prevents partial writes followed by deleting the whole SQS batch (lost events).
-		transactItems := make([]types.TransactWriteItem, 0, len(counts))
-		for key, count := range counts {
-			roomID, reactionType := splitRoomReactionKey(key)
-			if roomID == "" || reactionType == "" {
-				log.Printf("[AGGREGATOR] bad aggregate key %q, skipping", key)
-				continue
+		// Discard poison pills immediately — they will never succeed.
+		if len(poisonMsgs) > 0 {
+			if _, err := a.sqs.DeleteMessageBatch(context.TODO(), &sqs.DeleteMessageBatchInput{
+				QueueUrl: aws.String(a.cfg.ReactionQueueURL),
+				Entries:  poisonMsgs,
+			}); err != nil {
+				log.Printf("[AGGREGATOR:%d] SQS poison delete error: %v", id, err)
 			}
+		}
+
+		if len(counts) == 0 {
+			continue
+		}
+
+		// Build TransactWriteItem list from aggregated counts.
+		var transactItems []types.TransactWriteItem
+		for k, count := range counts {
 			transactItems = append(transactItems, types.TransactWriteItem{
 				Update: &types.Update{
 					TableName: aws.String(a.cfg.ReactionsTable),
 					Key: map[string]types.AttributeValue{
-						"room_id":       &types.AttributeValueMemberS{Value: roomID},
-						"reaction_type": &types.AttributeValueMemberS{Value: reactionType},
+						"room_id":       &types.AttributeValueMemberS{Value: k.roomID},
+						"reaction_type": &types.AttributeValueMemberS{Value: k.reactionType},
 					},
 					UpdateExpression: aws.String("ADD #count :inc"),
 					ExpressionAttributeNames: map[string]string{
@@ -121,39 +155,42 @@ func (a *Aggregator) Start() {
 			})
 		}
 
-		if len(transactItems) > 0 {
+		// DynamoDB TransactWriteItems limit is 100 items — chunk if needed.
+		const maxTransactItems = 100
+		failed := false
+		for i := 0; i < len(transactItems); i += maxTransactItems {
+			end := i + maxTransactItems
+			if end > len(transactItems) {
+				end = len(transactItems)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			_, err := a.db.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-				TransactItems: transactItems,
+				TransactItems: transactItems[i:end],
 			})
 			cancel()
 			if err != nil {
-				log.Printf("[AGGREGATOR] TransactWriteItems error: %v", err)
-				continue
-			}
-			for key, count := range counts {
-				log.Printf("[AGGREGATOR] Updated %s: +%d", key, count)
+				log.Printf("[AGGREGATOR:%d] TransactWriteItems error (chunk %d-%d): %v", id, i, end, err)
+				failed = true
+				break
 			}
 		}
+		if failed {
+			continue
+		}
 
-		// Delete the SQS batch only after the transaction commits successfully.
-		if len(processed) > 0 && len(transactItems) > 0 {
-			_, err := a.sqs.DeleteMessageBatch(context.TODO(), &sqs.DeleteMessageBatchInput{
+		for k, count := range counts {
+			log.Printf("[AGGREGATOR:%d] Updated %s#%s: +%d", id, k.roomID, k.reactionType, count)
+		}
+
+		// Delete valid SQS messages only after all transactions commit successfully.
+		if len(validMsgs) > 0 {
+			if _, err := a.sqs.DeleteMessageBatch(context.TODO(), &sqs.DeleteMessageBatchInput{
 				QueueUrl: aws.String(a.cfg.ReactionQueueURL),
-				Entries:  processed,
-			})
-			if err != nil {
-				log.Printf("[AGGREGATOR] SQS batch delete error: %v", err)
+				Entries:  validMsgs,
+			}); err != nil {
+				log.Printf("[AGGREGATOR:%d] SQS batch delete error: %v", id, err)
 			}
 		}
 	}
 }
 
-// splitRoomReactionKey parses aggregate keys "room_id#reaction_type" (reaction_type must not contain '#').
-func splitRoomReactionKey(key string) (roomID, reactionType string) {
-	i := strings.LastIndex(key, "#")
-	if i <= 0 || i >= len(key)-1 {
-		return "", ""
-	}
-	return key[:i], key[i+1:]
-}

@@ -41,9 +41,10 @@ type Config struct {
 	JWTSecret string
 
 	// --- Feature flags ---
-	ReactionMode string // "sync" or "async" (experiment 3 toggle)
-	CacheEnabled bool   // toggle Redis cache (experiment 5)
-	RateLimitRPS int    // requests per second per user, 0 = disabled
+	ReactionMode       string // "sync" or "async" (experiment 3 toggle)
+	AggregatorWorkers  int    // number of parallel SQS consumer goroutines
+	CacheEnabled       bool   // toggle Redis cache (experiment 5)
+	RateLimitRPS       int    // requests per second per user, 0 = disabled
 }
 
 // Load reads configuration from environment variables.
@@ -71,8 +72,9 @@ func Load() *Config {
 		BroadcastQueueURL: getEnv("SQS_BROADCAST_QUEUE_URL", ""),
 
 		JWTSecret:    getEnv("JWT_SECRET", "dev-secret-change-in-prod"),
-		ReactionMode: getEnv("REACTION_MODE", "async"),
-		CacheEnabled: getEnv("CACHE_ENABLED", "true") == "true",
+		ReactionMode:      getEnv("REACTION_MODE", "async"),
+		AggregatorWorkers: getEnvInt("AGGREGATOR_WORKERS", 1),
+		CacheEnabled:      getEnv("CACHE_ENABLED", "true") == "true",
 		RateLimitRPS: getEnvInt("RATE_LIMIT_RPS", 20),
 	}
 }
