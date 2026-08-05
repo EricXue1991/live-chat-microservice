@@ -25,6 +25,66 @@ Client (React) ───────► ALB ──►│──► ECS (Go API x 
                           Analytics
                         Consumer(s)
 ```
+## Message Delievery Path (Cross Replicas)
+```
+React Client A                 React Client B
+    |                               |
+    | WebSocket                     | WebSocket
+    v                               v
+          ALB
+           |
+   +-------+----------------+
+   |                        |
+Go API Instance 1       Go API Instance 2
+local WS hub            local WS hub
+A's connection          B's connection
+   |
+   | User A sends message
+   v
+persist message to DynamoDB
+   |
+   +--> direct local broadcast
+   |        -> push to clients connected to Instance 1
+   |
+   +--> publish event to SNS topic
+            |
+            v
+        SQS fan-out
+            |
+            v
+      Instance 2 consumes event
+            |
+            v
+      local hub checks room sessions
+            |
+            v
+      push to B's WebSocket
+```
+
+## Reaction Aggregation (How SQS reduce latency)
+```
+User clicks reaction
+   |
+   v
+Go API /api/reactions
+   |
+   +--> sync version:
+   |        directly update DynamoDB counter
+   |        slower request path
+   |
+   +--> async version:
+            send reaction event to SQS
+            return quickly
+            |
+            v
+      reaction aggregator worker
+            |
+            v
+      batch / aggregate reaction counts
+            |
+            v
+      update DynamoDB
+```
 
 ## Components
 
